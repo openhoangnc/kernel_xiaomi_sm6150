@@ -1,0 +1,110 @@
+name: Build davinci
+
+on: [push, workflow_dispatch, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Setup env
+      run: |
+        echo "CLANG_VER=13" >> $GITHUB_ENV
+        echo "DEFCONFIG=davinci" >> $GITHUB_ENV
+
+    - name: Install toolchain packages
+      uses: awalsh128/cache-apt-pkgs-action@latest
+      with:
+        packages: |
+          make bc bison openssl ccache
+          curl zip kmod cpio flex libelf-dev libssl-dev libtfm-dev wget
+          device-tree-compiler ca-certificates python3
+          binutils binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
+          clang-${{ env.CLANG_VER }} lld-${{ env.CLANG_VER }} llvm-${{ env.CLANG_VER }}
+
+    - name: Config toolchains
+      run: |
+        sudo ln -sf "/usr/bin/python3" /usr/bin/python
+        sudo ln -sf /usr/bin/clang-"$CLANG_VER" /usr/bin/clang
+        sudo ln -sf /usr/bin/clang-"$CLANG_VER" /usr/bin/clang++
+        sudo ln -sf /usr/bin/ld.lld-"$CLANG_VER" /usr/bin/ld.lld
+        for i in /usr/bin/llvm-*-"$CLANG_VER"; do
+            sudo ln -sf "$i" "${i/-$CLANG_VER}"
+        done
+        echo CLANG_TRIPLE="aarch64-linux-gnu-" >> $GITHUB_ENV
+        echo CROSS_COMPILE="aarch64-linux-gnu-" >> $GITHUB_ENV
+        echo CROSS_COMPILE_ARM32="arm-linux-gnueabi-" >> $GITHUB_ENV
+        mkdir .bin
+        printf "#!/usr/bin/env sh\nccache clang \"\$@\"\n" > .bin/ccache-clang
+        printf "#!/usr/bin/env sh\nccache clang++ \"\$@\"\n" > .bin/ccache-clang++
+        chmod +x .bin/ccache-clang
+        chmod +x .bin/ccache-clang++
+        sudo mv .bin/* /usr/bin/
+        echo "MAKE_OPTS=O=.out/$DEFCONFIG ARCH=arm64 CC=ccache-clang HOSTCC=ccache-clang HOSTCXX=ccache-clang++" >> $GITHUB_ENV
+        
+
+    - name: Checkout kernel source
+      uses: actions/checkout@v3
+
+    - name: Export kernel version
+      run: |
+        echo $(cat Makefile | grep "^VERSION =" | sed "s/ //g") >> $GITHUB_ENV
+        echo $(cat Makefile | grep "^PATCHLEVEL =" | sed "s/ //g") >> $GITHUB_ENV
+        echo $(cat Makefile | grep "^SUBLEVEL =" | sed "s/ //g") >> $GITHUB_ENV
+        ccache -o cache_dir=$PWD/.cache
+        ccache -z -p
+
+    - name: Cache
+      uses: actions/cache@v3
+      with:
+        key: ccache-${{ env.DEFCONFIG }}-${{ env.VERSION }}.${{ env.PATCHLEVEL }}.${{ env.SUBLEVEL }}
+        path: .cache
+
+    - name: Generate defconfig
+      run: |
+        echo make $MAKE_OPTS "$DEFCONFIG"_defconfig
+        make $MAKE_OPTS "$DEFCONFIG"_defconfig
+
+    - name: Prepare build
+      run: |
+        echo make $MAKE_OPTS -j$(nproc --all) prepare
+        make $MAKE_OPTS -j$(nproc --all) prepare
+
+    - name: Build
+      run: |
+        echo make $MAKE_OPTS -j$(nproc --all)
+        make $MAKE_OPTS -j$(nproc --all)
+        echo "BUILD_TIME=$(date +'%Y-%m-%dT%H-%M-%S')" >> $GITHUB_ENV
+        ccache -s
+
+    - name: Make flashable zip
+      run: |
+        git clone https://github.com/osm0sis/AnyKernel3.git --depth=1
+
+        cp -r .out/${{ env.DEFCONFIG }}/arch/arm64/boot/dtb.img AnyKernel3/
+        cp -r .out/${{ env.DEFCONFIG }}/arch/arm64/boot/dtbo.img AnyKernel3/
+        cp -r .out/${{ env.DEFCONFIG }}/arch/arm64/boot/Image.gz AnyKernel3/
+        cp -f .github/workflows/anykernel-$DEFCONFIG.sh AnyKernel3/anykernel.sh
+
+        cd AnyKernel3
+        rm -rf .git README.md modules patch ramdisk
+        export FLASH_ZIP=$DEFCONFIG-$VERSION.$PATCHLEVEL.$SUBLEVEL-$BUILD_TIME.zip
+        zip -r9 ../$FLASH_ZIP *
+        echo FLASH_ZIP=$FLASH_ZIP >> $GITHUB_ENV
+
+    - name: Upload flashable zip artifact
+      uses: actions/upload-artifact@v3.1.2
+      with:
+        name: ${{ env.FLASH_ZIP }}
+        path: ${{ env.FLASH_ZIP }}
+
+    - name: Release build
+      uses: ncipollo/release-action@v1
+      with:
+        name: ${{ env.DEFCONFIG }}-${{ env.VERSION }}.${{ env.PATCHLEVEL }}.${{ env.SUBLEVEL }}
+        tag: ${{ env.DEFCONFIG }}-${{ env.VERSION }}.${{ env.PATCHLEVEL }}.${{ env.SUBLEVEL }}
+        allowUpdates: true
+        artifacts: ${{ env.FLASH_ZIP }}
+        removeArtifacts: false
+        replacesArtifacts: false
+        token: ${{ secrets.GITHUB_TOKEN }}
