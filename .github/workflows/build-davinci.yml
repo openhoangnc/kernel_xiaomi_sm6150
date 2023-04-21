@@ -9,17 +9,22 @@ jobs:
     steps:
     - name: Setup env
       run: |
-        echo "CLANG_VER=13" >> $GITHUB_ENV
+        echo "CLANG_VER=16" >> $GITHUB_ENV
         echo "DEFCONFIG=davinci" >> $GITHUB_ENV
 
+    - name: Pre install packages
+      run: |
+        wget https://apt.llvm.org/llvm.sh
+        chmod +x llvm.sh
+        sudo ./llvm.sh ${{ env.CLANG_VER }}
+
     - name: Install toolchain packages
-      uses: awalsh128/cache-apt-pkgs-action@latest
-      with:
-        packages: |
-          make bc bison openssl ccache
-          curl zip kmod cpio flex libelf-dev libssl-dev libtfm-dev wget
-          device-tree-compiler ca-certificates python3
-          binutils binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
+      run: |
+        sudo apt install -y \
+          make bc bison openssl \
+          curl zip kmod cpio flex libelf-dev libssl-dev libtfm-dev wget \
+          device-tree-compiler ca-certificates python3 \
+          binutils binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
           clang-${{ env.CLANG_VER }} lld-${{ env.CLANG_VER }} llvm-${{ env.CLANG_VER }}
 
     - name: Config toolchains
@@ -34,14 +39,7 @@ jobs:
         echo CLANG_TRIPLE="aarch64-linux-gnu-" >> $GITHUB_ENV
         echo CROSS_COMPILE="aarch64-linux-gnu-" >> $GITHUB_ENV
         echo CROSS_COMPILE_ARM32="arm-linux-gnueabi-" >> $GITHUB_ENV
-        mkdir .bin
-        printf "#!/usr/bin/env sh\nccache clang \"\$@\"\n" > .bin/ccache-clang
-        printf "#!/usr/bin/env sh\nccache clang++ \"\$@\"\n" > .bin/ccache-clang++
-        chmod +x .bin/ccache-clang
-        chmod +x .bin/ccache-clang++
-        sudo mv .bin/* /usr/bin/
-        echo "MAKE_OPTS=O=.out/$DEFCONFIG ARCH=arm64 CC=ccache-clang HOSTCC=ccache-clang HOSTCXX=ccache-clang++" >> $GITHUB_ENV
-        
+        echo "MAKE_OPTS=O=.out/$DEFCONFIG ARCH=arm64 CC=clang HOSTCC=clang HOSTCXX=clang++" >> $GITHUB_ENV
 
     - name: Checkout kernel source
       uses: actions/checkout@v3
@@ -51,14 +49,6 @@ jobs:
         echo $(cat Makefile | grep "^VERSION =" | sed "s/ //g") >> $GITHUB_ENV
         echo $(cat Makefile | grep "^PATCHLEVEL =" | sed "s/ //g") >> $GITHUB_ENV
         echo $(cat Makefile | grep "^SUBLEVEL =" | sed "s/ //g") >> $GITHUB_ENV
-        ccache -o cache_dir=$PWD/.cache
-        ccache -z -p
-
-    - name: Cache
-      uses: actions/cache@v3
-      with:
-        key: ccache-${{ env.DEFCONFIG }}-${{ env.VERSION }}.${{ env.PATCHLEVEL }}.${{ env.SUBLEVEL }}
-        path: .cache
 
     - name: Generate defconfig
       run: |
@@ -75,7 +65,6 @@ jobs:
         echo make $MAKE_OPTS -j$(nproc --all)
         make $MAKE_OPTS -j$(nproc --all)
         echo "BUILD_TIME=$(date +'%Y-%m-%dT%H-%M-%S')" >> $GITHUB_ENV
-        ccache -s
 
     - name: Make flashable zip
       run: |
